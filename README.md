@@ -11,8 +11,8 @@ the app reads, commits them here and publishes them.
 
 | URL | Contents |
 |---|---|
-| `https://block21.github.io/mywallet-currency/latest.json` | The newest rates |
-| `https://block21.github.io/mywallet-currency/history/YYYY-MM-DD.json` | The rates published on that UTC day |
+| `https://currency.block21.com/latest.json` | The newest rates |
+| `https://currency.block21.com/history/YYYY-MM-DD.json` | The rates published on that UTC day |
 
 ```json
 {
@@ -62,6 +62,16 @@ python3 scripts/build_rates.py public
 ## Setup
 
 Under **Settings → Pages**, set **Source** to **GitHub Actions**.
+
+The site is served at `currency.block21.com`:
+
+- DNS (Loopia): a CNAME `currency.block21.com` → `block21.github.io`, and the
+  TXT record `_github-pages-challenge-block21.currency.block21.com` that
+  verifies the domain for the block21 organisation
+- **Settings → Pages**: custom domain `currency.block21.com`, **Enforce HTTPS** on
+
+The old `block21.github.io/mywallet-currency/` address redirects to it. Since the
+workflow deploys an artifact, no `CNAME` file is needed in `public/`.
 
 ## Licence of the data
 
