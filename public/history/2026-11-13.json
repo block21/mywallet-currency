@@ -1,7 +1,7 @@
 {
   "base": "USD",
   "asOf": "2026-11-13",
-  "generatedAt": "2026-11-13T08:15:19Z",
+  "generatedAt": "2026-11-13T08:21:35Z",
   "source": "Frankfurter (frankfurter.dev), blended central bank reference rates",
   "rates": {
     "AED": 3.6725,
