@@ -22,7 +22,7 @@ required currency missing, a non-positive rate, rates older than
 previous ``latest.json``. Set ``FORCE=true`` to skip the movement check after
 checking a genuine large move, such as a devaluation.
 
-Standard library only.
+Standard library only. Tests: ``python3 -m unittest discover -s scripts``.
 """
 
 from __future__ import annotations
@@ -50,6 +50,91 @@ MAX_MOVE = Decimal("0.5")  # 50% against the previous file
 USER_AGENT = "mywallet-currency/1.0 (+https://github.com/block21/mywallet-currency)"
 
 
+class BuildError(Exception):
+    """The data looks wrong; nothing should be published."""
+
+
+# MARK: - Building
+
+
+def build(
+    currency_rows: list[dict],
+    rate_rows: list[dict],
+    previous: dict[str, Decimal],
+    now: dt.datetime,
+    force: bool = False,
+) -> tuple[str, list[str]]:
+    """The document to publish and any warnings, or ``BuildError``.
+
+    ``currency_rows`` and ``rate_rows`` are Frankfurter's ``/currencies`` and
+    ``/rates?base=USD`` answers; ``previous`` is the rates of the last
+    published file, empty on the first run.
+    """
+    currencies = {row["iso_code"] for row in currency_rows if row.get("type") == "currency"}
+
+    rates: dict[str, Decimal] = {}
+    dates: set[str] = set()
+    for row in rate_rows:
+        if row.get("base") == BASE and row.get("quote") in currencies:
+            rates[row["quote"]] = Decimal(row["rate"])
+            dates.add(row["date"])
+
+    if len(rates) < MIN_CURRENCIES:
+        raise BuildError(f"Only {len(rates)} currencies, expected at least {MIN_CURRENCIES}")
+    missing = REQUIRED - rates.keys()
+    if missing:
+        raise BuildError(f"Required currencies missing: {', '.join(sorted(missing))}")
+    bad = [code for code, rate in rates.items() if rate <= 0]
+    if bad:
+        raise BuildError(f"Non-positive rates for: {', '.join(sorted(bad))}")
+
+    as_of = max(dates)
+    age = (now.date() - dt.date.fromisoformat(as_of)).days
+    if age > MAX_AGE_DAYS:
+        raise BuildError(f"Newest rate is from {as_of}, {age} days old")
+
+    warnings = []
+    moved = []
+    for code, rate in rates.items():
+        before = previous.get(code)
+        if before and abs(rate - before) / before > MAX_MOVE:
+            moved.append(f"{code} {before} -> {rate}")
+    if moved and not force:
+        raise BuildError(
+            "Rates moved more than 50% since the last file (rerun with force if genuine): " + "; ".join(moved)
+        )
+    warnings += [f"Forced past a large move: {line}" for line in moved]
+
+    dropped = sorted(previous.keys() - rates.keys())
+    if dropped:
+        warnings.append(f"No longer published: {', '.join(dropped)}")
+
+    document = {
+        "base": BASE,
+        "asOf": as_of,
+        "generatedAt": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": SOURCE,
+    }
+    text = render(document, rates)
+    json.loads(text)  # the output must be valid JSON
+    return text, warnings
+
+
+def render(document: dict, rates: dict[str, Decimal]) -> str:
+    """The document as JSON, with every rate written as a plain decimal literal."""
+    header = ",\n  ".join(f"{json.dumps(key)}: {json.dumps(value)}" for key, value in document.items())
+    body = ",\n    ".join(f"{json.dumps(code)}: {format(rate, 'f')}" for code, rate in sorted(rates.items()))
+    return "{\n  " + header + ',\n  "rates": {\n    ' + body + "\n  }\n}\n"
+
+
+def read_rates(text: str) -> dict[str, Decimal]:
+    """The rates of a published document, exact."""
+    return json.loads(text, parse_float=Decimal, parse_int=Decimal).get("rates", {})
+
+
+# MARK: - Running
+
+
 def fetch(path: str, attempts: int = 3):
     """GET ``API + path`` as JSON with decimals kept exact, retrying briefly."""
     request = urllib.request.Request(
@@ -66,83 +151,26 @@ def fetch(path: str, attempts: int = 3):
             time.sleep(5 * attempt)
 
 
-def fail(message: str) -> None:
-    print(f"::error::{message}")
-    sys.exit(1)
-
-
-def load_previous(path: pathlib.Path) -> dict[str, Decimal]:
-    if not path.exists():
-        return {}
-    with path.open() as file:
-        return json.load(file, parse_float=Decimal, parse_int=Decimal).get("rates", {})
-
-
-def render(document: dict, rates: dict[str, Decimal]) -> str:
-    """The document as JSON, with every rate written as a plain decimal literal."""
-    header = ",\n  ".join(f"{json.dumps(key)}: {json.dumps(value)}" for key, value in document.items())
-    body = ",\n    ".join(f"{json.dumps(code)}: {format(rate, 'f')}" for code, rate in sorted(rates.items()))
-    return "{\n  " + header + ',\n  "rates": {\n    ' + body + "\n  }\n}\n"
-
-
 def main() -> None:
     out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "public")
     force = os.environ.get("FORCE", "").lower() == "true"
-    today = dt.datetime.now(dt.timezone.utc).date()
+    now = dt.datetime.now(dt.timezone.utc)
 
-    currencies = {row["iso_code"] for row in fetch("/currencies") if row.get("type") == "currency"}
-    rows = fetch(f"/rates?base={BASE}")
+    latest = out / "latest.json"
+    previous = read_rates(latest.read_text()) if latest.exists() else {}
 
-    rates: dict[str, Decimal] = {}
-    dates: set[str] = set()
-    for row in rows:
-        if row.get("base") == BASE and row.get("quote") in currencies:
-            rates[row["quote"]] = row["rate"]
-            dates.add(row["date"])
-
-    # Validation
-    if len(rates) < MIN_CURRENCIES:
-        fail(f"Only {len(rates)} currencies, expected at least {MIN_CURRENCIES}")
-    missing = REQUIRED - rates.keys()
-    if missing:
-        fail(f"Required currencies missing: {', '.join(sorted(missing))}")
-    bad = [code for code, rate in rates.items() if rate <= 0]
-    if bad:
-        fail(f"Non-positive rates for: {', '.join(sorted(bad))}")
-
-    as_of = max(dates)
-    age = (today - dt.date.fromisoformat(as_of)).days
-    if age > MAX_AGE_DAYS:
-        fail(f"Newest rate is from {as_of}, {age} days old")
-
-    previous = load_previous(out / "latest.json")
-    moved = []
-    for code, rate in rates.items():
-        before = previous.get(code)
-        if before and abs(rate - before) / before > MAX_MOVE:
-            moved.append(f"{code} {before} -> {rate}")
-    if moved and not force:
-        fail("Rates moved more than 50% since the last file (rerun with force if genuine): " + "; ".join(moved))
-    for line in moved:
-        print(f"::warning::Forced past a large move: {line}")
-
-    dropped = sorted(previous.keys() - rates.keys())
-    if dropped:
-        print(f"::warning::No longer published: {', '.join(dropped)}")
-
-    document = {
-        "base": BASE,
-        "asOf": as_of,
-        "generatedAt": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "source": SOURCE,
-    }
-    text = render(document, rates)
-    json.loads(text)  # the output must be valid JSON
+    try:
+        text, warnings = build(fetch("/currencies"), fetch(f"/rates?base={BASE}"), previous, now, force)
+    except BuildError as error:
+        print(f"::error::{error}")
+        sys.exit(1)
+    for warning in warnings:
+        print(f"::warning::{warning}")
 
     (out / "history").mkdir(parents=True, exist_ok=True)
-    (out / "latest.json").write_text(text)
-    (out / "history" / f"{today.isoformat()}.json").write_text(text)
-    print(f"Wrote {len(rates)} rates as of {as_of} to {out}")
+    latest.write_text(text)
+    (out / "history" / f"{now.date().isoformat()}.json").write_text(text)
+    print(f"Wrote {len(read_rates(text))} rates to {out}")
 
 
 if __name__ == "__main__":

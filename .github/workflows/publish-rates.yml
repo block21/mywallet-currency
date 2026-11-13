@@ -32,6 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Test the build script
+        run: python3 -m unittest discover -s scripts -v
+
       - name: Build rates
         env:
           FORCE: ${{ inputs.force || 'false' }}

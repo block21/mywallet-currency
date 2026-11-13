@@ -49,9 +49,13 @@ last good files stay online. It stops when:
 If a large move is real (a devaluation, say), run the workflow by hand with
 **force** checked.
 
+Each run first tests the script (`scripts/test_build_rates.py`), and a
+failing test stops the run before anything is published.
+
 Run it locally with:
 
 ```sh
+python3 -m unittest discover -s scripts
 python3 scripts/build_rates.py public
 ```
 
