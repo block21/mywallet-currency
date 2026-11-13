@@ -1,0 +1,68 @@
+name: Publish rates
+
+# Daily after the European central banks publish (ECB ~16:00 CET), plus
+# manual runs and runs when the build itself changes
+on:
+  schedule:
+    - cron: "30 16 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish even if a rate moved more than 50% (after checking the move is genuine)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/publish-rates.yml"
+
+permissions:
+  contents: write   # commit the day's files
+  pages: write      # deploy to GitHub Pages
+  id-token: write   # required by deploy-pages
+
+concurrency:
+  group: publish-rates
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build rates
+        env:
+          FORCE: ${{ inputs.force || 'false' }}
+        run: python3 scripts/build_rates.py public
+
+      # Committing keeps a history in git and counts as repository activity,
+      # which stops GitHub disabling the schedule after 60 quiet days
+      - name: Commit the day's files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Rates for $(date -u +%F)"
+            git push
+          fi
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
