@@ -40,6 +40,14 @@ jobs:
           FORCE: ${{ inputs.force || 'false' }}
         run: python3 scripts/build_rates.py public
 
+      # Builds only missing files, so it does nothing most days: the first
+      # run of a month builds the month that just ended, and the first run of
+      # a year also builds the year. A failed run is retried the next day,
+      # and a failure here doesn't hold back the day's rates.
+      - name: Build finished months and years
+        continue-on-error: true
+        run: python3 scripts/build_yearly.py public
+
       # Committing keeps a history in git and counts as repository activity,
       # which stops GitHub disabling the schedule after 60 quiet days
       - name: Commit the day's files
