@@ -14,7 +14,7 @@ the app reads, commits them here and publishes them.
 | `https://currency.block21.com/latest.json` | The newest rates |
 | `https://currency.block21.com/history/YYYY-MM-DD.json` | The rates published on that UTC day |
 | `https://currency.block21.com/years/YYYY.json` | Daily rates for every day of a finished year (2010 onwards) |
-| `https://currency.block21.com/months/YYYY-MM.json` | Daily rates for every day of a finished month (2010-01 onwards) |
+| `https://currency.block21.com/months/YYYY-MM.json` | Daily rates for every day of a month (2010-01 onwards); the running month up to yesterday |
 
 ```json
 {
@@ -59,20 +59,30 @@ A month file has `"month": "2010-01"` in place of `"year"`.
   mid-2022, for example).
 - The currencies are the same as in `latest.json`. Retired codes Frankfurter
   no longer lists (EEK, HRK, BGN, BYR...) are left out.
-- Only finished periods get a file: years up to last year, and months up to
-  last month.
+- Years up to last year have a file, and every month up to the running
+  one.
+- The running month's file holds the 1st up to yesterday and is built
+  again every day, a day longer each time. A day is only written once it
+  is over, so its rates are the same in every file that holds it. The file
+  is complete when it reaches the month's last day, which the first run of
+  the next month makes it. On the 1st the new month has no file yet.
 
 `scripts/build_yearly.py` builds both, and only builds files that are
-missing:
+missing or not yet complete. A complete file is never written again, since
+the app fetches a finished month or year once and keeps it:
 
-- A past year's month files are cut from its year file, with no new
-  requests, so they always match it.
-- A month of the current year is fetched on its own.
-- When a year's file is built, its month files are rewritten from it.
+- A month of the current year is fetched on its own, the running month
+  every day.
+- When a year ends, its year file is put together from the twelve month
+  files published during the year, once December has been completed. The
+  months are left as they are, and the year holds exactly their days.
+- A year with no month files at all (the history before this repo) is
+  fetched whole and its month files cut from it.
+- `--rebuild` is the one way to write complete files again, by hand.
 
-The daily workflow runs the script every day. Most days it has nothing to
-do. The first run of a month builds the month that just ended, and the
-1 January run also builds the year. If a run fails, the next day's run tries
+The daily workflow runs the script every day. Most days it only builds the
+running month again. The first run of a month completes the month that just
+ended, and the 1 January run also puts the year together from its months. If a run fails, the next day's run tries
 again, and the day's rates are published either way.
 
 To build or rebuild files by hand:

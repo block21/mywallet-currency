@@ -9,7 +9,8 @@ year)::
     months/YYYY-MM.json  every day of one month
 
 and, for the current year, ``months/YYYY-MM.json`` for each month that has
-ended. Both have the same shape::
+ended and for the running month, which holds the days up to yesterday.
+Both have the same shape::
 
     {"base": "USD", "year": 2010, "generatedAt": "...", "source": "...",
      "days": {
@@ -20,9 +21,24 @@ ended. Both have the same shape::
 with ``"month": "2010-01"`` in place of ``"year"`` in a month file.
 
 Only missing files are built (``--rebuild`` rebuilds the range), so the
-daily workflow can run this every day: it does nothing until a month or a
-year ends. A past year's month files are cut from its year file, with no
-new requests; a month of the current year is fetched on its own.
+daily workflow can run this every day. A month of the current year is
+fetched on its own.
+
+A file that is complete is never written again, unless ``--rebuild`` asks
+for it: readers fetch a finished month or year once and keep it. So when a
+year ends, its year file is put together from the twelve month files
+published during the year, after December has been completed; the months
+are left as they are and the year holds exactly their days. Only a year
+with no month files at all, the history before this repo, is fetched whole
+and its month files cut from it.
+
+The running month's file is built again on every run, a day longer each
+time. It stops at yesterday: a day is only written once it is over, so the
+rates of a day are the same in every file that holds it, whenever it was
+built. A month file is complete when it reaches the month's last day, which
+the first run of the next month makes it; a reader tells a running month
+from a finished one by that. On the 1st the new month has no finished day
+and no file yet.
 
 Every calendar day is present. Frankfurter publishes most currencies on
 working days only, so a day without a fresh rate for a currency carries the
@@ -123,10 +139,21 @@ def build_year(year: int, currency_rows: list[dict], rate_rows: list[dict], now:
 
 
 def build_month(
-    year: int, month: int, currency_rows: list[dict], rate_rows: list[dict], now: dt.datetime
+    year: int,
+    month: int,
+    currency_rows: list[dict],
+    rate_rows: list[dict],
+    now: dt.datetime,
+    through: dt.date | None = None,
 ) -> tuple[str, list[str]]:
-    """The month's document and any warnings, or ``BuildError``."""
+    """The month's document and any warnings, or ``BuildError``.
+
+    ``through`` ends the document on that day when the month runs past it:
+    the running month, built up to yesterday.
+    """
     first, last = month_bounds(year, month)
+    if through is not None:
+        last = min(last, through)
     days, warnings = build_days(first, last, currency_rows, rate_rows)
     return render(header("month", f"{year}-{month:02d}", now), days), warnings
 
@@ -140,10 +167,50 @@ def split_year(text: str, now: dt.datetime) -> dict[str, str]:
     return {month: render(header("month", month, now), month_days) for month, month_days in months.items()}
 
 
+def join_months(year: int, month_texts: list[str], now: dt.datetime) -> str:
+    """A year document put together from its twelve month documents, their
+    days and rates exactly as they are. ``BuildError`` when the months do
+    not make up every day of the year.
+    """
+    days: dict[str, dict[str, Decimal]] = {}
+    for text in month_texts:
+        days.update(json.loads(text, parse_float=Decimal, parse_int=Decimal)["days"])
+    days = dict(sorted(days.items()))
+
+    expected, day = [], dt.date(year, 1, 1)
+    while day.year == year:
+        expected.append(day.isoformat())
+        day += dt.timedelta(days=1)
+    if list(days) != expected:
+        missing = sorted(set(expected) - set(days))
+        raise BuildError(f"{year}: the month files do not hold every day of the year, first missing: {missing[:1]}")
+    return render(header("year", year, now), days)
+
+
 def month_bounds(year: int, month: int) -> tuple[dt.date, dt.date]:
     first = dt.date(year, month, 1)
     after = dt.date(year + month // 12, month % 12 + 1, 1)
     return first, after - dt.timedelta(days=1)
+
+
+def current_year_months(today: dt.date) -> list[tuple[int, dt.date]]:
+    """The months of ``today``'s year that have a finished day, each with the
+    last day its file should reach: its own last day once it has ended,
+    yesterday while it runs. On the 1st the new month is left out.
+    """
+    yesterday = today - dt.timedelta(days=1)
+    months = []
+    for month in range(1, today.month + 1):
+        first, last = month_bounds(today.year, month)
+        through = min(last, yesterday)
+        if through >= first:
+            months.append((month, through))
+    return months
+
+
+def reaches(path: pathlib.Path, day: dt.date) -> bool:
+    """Whether the month file at ``path`` exists and holds ``day``."""
+    return path.exists() and f'"{day.isoformat()}": {{' in path.read_text()
 
 
 def header(kind: str, period: int | str, now: dt.datetime) -> dict:
@@ -175,14 +242,14 @@ def fetch_period(first: dt.date, last: dt.date) -> list[dict]:
     return fetch(f"/rates?base={BASE}&from={start}&to={last.isoformat()}")
 
 
-def main() -> None:
-    now = dt.datetime.now(dt.timezone.utc)
+def main(argv: list[str] | None = None, now: dt.datetime | None = None) -> None:
+    now = now or dt.datetime.now(dt.timezone.utc)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("out", nargs="?", default="public", help="output directory (default: public)")
     parser.add_argument("--from", dest="start", type=int, default=FIRST_YEAR, help=f"first year (default: {FIRST_YEAR})")
     parser.add_argument("--to", dest="end", type=int, default=now.year, help="last year (default: the current year)")
     parser.add_argument("--rebuild", action="store_true", help="rebuild files in the range that already exist")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.start > args.end or args.end > now.year:
         parser.error(f"years must run from earliest to latest and end by {now.year}, the current year")
 
@@ -214,31 +281,51 @@ def main() -> None:
             failed.append(label)
             return False
 
-    # Finished years, and their months cut from the year file
+    # Finished years. A year whose months were published as it went is put
+    # together from them, December completed first, and the months are left
+    # alone. A year with no month files is fetched whole and cut into months.
     for year in range(args.start, min(args.end, now.year - 1) + 1):
         year_path = out / "years" / f"{year}.json"
+        month_paths = [out / "months" / f"{year}-{month:02d}.json" for month in range(1, 13)]
+        fetched_whole = False
         if needed(year_path):
-            def make_year(year=year, year_path=year_path):
-                rows = fetch_period(dt.date(year, 1, 1), dt.date(year, 12, 31))
-                write(year_path, *build_year(year, currencies, rows, now), str(year))
-                return True
-            if not try_build(str(year), make_year):
-                continue
-        rebuilt_year = str(year) in written
+            if args.rebuild or not any(path.exists() for path in month_paths):
+                def make_year(year=year, year_path=year_path):
+                    rows = fetch_period(dt.date(year, 1, 1), dt.date(year, 12, 31))
+                    write(year_path, *build_year(year, currencies, rows, now), str(year))
+                    return True
+                fetched_whole = try_build(str(year), make_year)
+                if not fetched_whole:
+                    continue
+            else:
+                def make_year_from_months(year=year, year_path=year_path, month_paths=month_paths):
+                    for month, month_path in enumerate(month_paths, start=1):
+                        first, last = month_bounds(year, month)
+                        if not reaches(month_path, last):
+                            rows = fetch_period(first, last)
+                            write(month_path, *build_month(year, month, currencies, rows, now), month_path.stem)
+                    text = join_months(year, [path.read_text() for path in month_paths], now)
+                    write(year_path, text, [], str(year))
+                    return True
+                if not try_build(str(year), make_year_from_months):
+                    continue
         for month, text in split_year(year_path.read_text(), now).items():
             month_path = out / "months" / f"{month}.json"
-            if rebuilt_year or needed(month_path):
+            if fetched_whole or not month_path.exists():
                 write(month_path, text, [], month)
 
-    # Months of the current year that have ended, fetched one by one
+    # Months of the current year, fetched one by one: those that have ended,
+    # and the running month up to yesterday, which is built again every day
+    # and completed by the first run after it ends
     if args.end == now.year:
-        for month in range(1, now.month):
+        for month, through in current_year_months(now.date()):
             label = f"{now.year}-{month:02d}"
             month_path = out / "months" / f"{label}.json"
-            if needed(month_path):
-                def make_month(month=month, month_path=month_path, label=label):
-                    rows = fetch_period(*month_bounds(now.year, month))
-                    write(month_path, *build_month(now.year, month, currencies, rows, now), label)
+            if args.rebuild or not reaches(month_path, through):
+                def make_month(month=month, month_path=month_path, label=label, through=through):
+                    first, _ = month_bounds(now.year, month)
+                    rows = fetch_period(first, through)
+                    write(month_path, *build_month(now.year, month, currencies, rows, now, through), label)
                     return True
                 try_build(label, make_month)
 
